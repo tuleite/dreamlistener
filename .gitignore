@@ -1,0 +1,23 @@
+
+# Ambiente virtual e dependências
+.venv/
+venv/
+__pycache__/
+
+# Arquivos de configuração e chaves secretas
+.env
+
+# Mídia e histórico local
+audios/
+processados.txt
+meus_sonhos.md
+meus_sonhos_processados.md
+*.ogg
+*.opus
+*.mp3
+*.wav
+*.m4a
+
+# Arquivos de desenvolvimento / IDE
+.vscode/
+.DS_Store
