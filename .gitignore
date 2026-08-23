@@ -10,8 +10,9 @@ __pycache__/
 # Mídia e histórico local
 audios/
 processados.txt
+meus_sonhos.md
+meus_sonhos_processado.md
 *.json
-*.md
 *.ogg
 *.opus
 *.mp3
