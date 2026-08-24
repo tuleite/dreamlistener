@@ -12,6 +12,9 @@ audios/
 processados.txt
 meus_sonhos.md
 meus_sonhos_processado.md
+benchmark_pos_processamento_large-v3-turbo.md
+benchmark_pos_processamento_large-v3-turbo.csv
+*.csv
 *.json
 *.ogg
 *.opus
