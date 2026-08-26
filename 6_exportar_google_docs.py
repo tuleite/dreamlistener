@@ -68,15 +68,33 @@ def obter_ou_criar_documento(docs_service, drive_service, titulo_doc: str) -> tu
 
 def obter_ou_criar_guia_por_data(docs_service, doc_id: str, nome_data: str) -> tuple[str, int]:
     """
-    Busca se a guia com a data já existe no documento.
-    Se a primeira guia do documento ainda for genérica (ex: 'Documento1'), renomeia ela.
-    Se não existir, cria uma nova aba com o nome da data.
-    Retorna: (tab_id, index_para_inserir)
+    Garante que a 1ª aba seja reservada para '📌 Índice & Análises'.
+    Cria ou localiza a aba específica para a data do sonho informado.
     """
     documento = docs_service.documents().get(documentId=doc_id, includeTabsContent=True).execute()
     tabs = documento.get("tabs", [])
 
-    # 1. Procura se a guia com esta data exata já existe
+    # 1. Garante que a primeira aba tenha um nome fixo reservado para o Índice/Análise
+    if tabs:
+        primeira_tab = tabs[0]
+        tab_id_primeira = primeira_tab.get("tabProperties", {}).get("tabId")
+        titulo_primeira = primeira_tab.get("tabProperties", {}).get("title", "")
+        
+        if titulo_primeira not in ["📌 Índice & Análises", "Índice"]:
+            # Insere um texto inicial explicativo na 1ª aba se ela estiver vazia
+            print("📌 Reservando a 1ª aba para o Índice & Análises do diário...")
+            texto_intro = "📌 DIÁRIO DE SONHOS — ÍNDICE & ANÁLISES\n\nEsta aba é reservada para resumos, mapeamento de tags e sínteses do agente analítico.\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+            docs_service.documents().batchUpdate(
+                documentId=doc_id,
+                body={"requests": [{
+                    "insertText": {
+                        "location": {"index": 1, "tabId": tab_id_primeira},
+                        "text": texto_intro
+                    }
+                }]}
+            ).execute()
+
+    # 2. Busca se a aba para a data especificada já existe
     for tab in tabs:
         tab_properties = tab.get("tabProperties", {})
         if tab_properties.get("title") == nome_data:
@@ -86,35 +104,8 @@ def obter_ou_criar_guia_por_data(docs_service, doc_id: str, nome_data: str) -> t
             print(f"📌 Guia '{nome_data}' encontrada (Tab ID: {tab_id}).")
             return tab_id, end_index
 
-    # 2. Se o documento for novo e só tiver 1 aba sem nome da data, renomeia a aba inicial
-    if len(tabs) == 1:
-        primeira_tab = tabs[0]
-        tab_id = primeira_tab.get("tabProperties", {}).get("tabId")
-        titulo_atual = primeira_tab.get("tabProperties", {}).get("title", "")
-
-        # Se a primeira aba ainda tem nome genérico do Google Docs, atualiza o nome para a data
-        if titulo_atual in ["Documento sem título", "Tab 1", "Página 1", ""]:
-            print(f"✏️ Renomeando aba inicial para a data: '{nome_data}'...")
-            req_update_tab = {
-                "updateTabProperties": {
-                    "tabProperties": {
-                        "tabId": tab_id,
-                        "title": nome_data
-                    },
-                    "fields": "title"
-                }
-            }
-            docs_service.documents().batchUpdate(
-                documentId=doc_id,
-                body={"requests": [req_update_tab]}
-            ).execute()
-            
-            body_content = primeira_tab.get("documentTab", {}).get("body", {}).get("content", [])
-            end_index = body_content[-1].get("endIndex", 1) - 1 if body_content else 1
-            return tab_id, end_index
-
-    # 3. Se não encontrou e já existem outras abas, cria uma nova guia dedicada
-    print(f"✨ Criando nova guia para a data: '{nome_data}'...")
+    # 3. Cria uma nova aba para a data do sonho
+    print(f"✨ Criando nova guia de data: '{nome_data}'...")
     req_add_tab = {
         "addDocumentTab": {
             "tabProperties": {
@@ -132,7 +123,6 @@ def obter_ou_criar_guia_por_data(docs_service, doc_id: str, nome_data: str) -> t
     tab_id = new_tab.get("tabId")
     
     return tab_id, 1
-
 
 def adicionar_sonho_em_guia(
     docs_service, 
