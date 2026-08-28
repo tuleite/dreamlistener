@@ -9,10 +9,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 from google import genai
 from groq import Groq
-from importlib import import_module
-
-# Importa o módulo do Google Docs
-exportar_docs = import_module("6_exportar_google_docs")
+from app import export_docs
 
 load_dotenv()
 
