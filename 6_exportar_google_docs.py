@@ -68,21 +68,29 @@ def obter_ou_criar_documento(docs_service, drive_service, titulo_doc: str) -> tu
 
 def obter_ou_criar_guia_por_data(docs_service, doc_id: str, nome_data: str) -> tuple[str, int]:
     """
-    Garante que a 1ª aba seja reservada para '📌 Índice & Análises'.
+    Garante que a 1ª aba seja reservada para '📌 Índice & Análises' apenas uma vez.
     Cria ou localiza a aba específica para a data do sonho informado.
     """
     documento = docs_service.documents().get(documentId=doc_id, includeTabsContent=True).execute()
     tabs = documento.get("tabs", [])
 
-    # 1. Garante que a primeira aba tenha um nome fixo reservado para o Índice/Análise
+    # 1. Checa a primeira aba para garantir a introdução SEM duplicar
     if tabs:
         primeira_tab = tabs[0]
         tab_id_primeira = primeira_tab.get("tabProperties", {}).get("tabId")
-        titulo_primeira = primeira_tab.get("tabProperties", {}).get("title", "")
+        body_content = primeira_tab.get("documentTab", {}).get("body", {}).get("content", [])
         
-        if titulo_primeira not in ["📌 Índice & Análises", "Índice"]:
-            # Insere um texto inicial explicativo na 1ª aba se ela estiver vazia
-            print("📌 Reservando a 1ª aba para o Índice & Análises do diário...")
+        # Extrai o texto acumulado na 1ª aba para verificar se o título já existe
+        texto_acumulado_1a_aba = ""
+        for elem in body_content:
+            paragraph = elem.get("paragraph")
+            if paragraph:
+                for el in paragraph.get("elements", []):
+                    texto_acumulado_1a_aba += el.get("textRun", {}).get("content", "")
+
+        # Só insere o cabeçalho se ele ainda NÃO estiver presente na 1ª aba
+        if "📌 DIÁRIO DE SONHOS" not in texto_acumulado_1a_aba:
+            print("📌 Configurando 1ª aba para 'Índice & Análises' pela primeira vez...")
             texto_intro = "📌 DIÁRIO DE SONHOS — ÍNDICE & ANÁLISES\n\nEsta aba é reservada para resumos, mapeamento de tags e sínteses do agente analítico.\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
             docs_service.documents().batchUpdate(
                 documentId=doc_id,
