@@ -3,15 +3,25 @@ import json
 import time
 from dotenv import load_dotenv
 from google import genai
-from importlib import import_module
+from google.genai.errors import APIError
 
-# Importa o módulo do Google Docs
-exportar_docs = import_module("6_exportar_google_docs")
+
+# Importa o módulo do Google Docs localizado na pasta app/
+from app import export_docs
 
 load_dotenv()
 
-ARQUIVO_JSON_BRUTO = "sonhos_brutos_large-v3-turbo.json"
-ARQUIVO_BACKUP_MD = "meus_sonhos.md"
+# Configuração de caminhos tolerante à nova estrutura
+MODELO_WHISPER = "whisper-large-v3"
+ARQUIVO_JSON_BRUTO = os.path.join("data", "json_caches", f"sonhos_brutos_{MODELO_WHISPER}.json")
+ARQUIVO_BACKUP_MD = os.path.join("data", "meus_sonhos.md")
+
+# Lista priorizada de modelos (da maior qualidade para maior disponibilidade)
+MODELOS_GEMINI_FALLBACK = [
+    "gemini-3.6-flash",       # Primário: Maior precisão gramatical/narrativa
+    "gemini-3.1-flash-lite",  # Secundário: Ultra-rápido, cota separada
+    "gemini-1.5-flash"        # Terciário: Fallback estável de alta disponibilidade
+]
 
 
 def carregar_dados_brutos() -> list:
@@ -24,12 +34,16 @@ def carregar_dados_brutos() -> list:
 
 def salvar_dados_brutos(dados: list) -> None:
     """Salva as atualizações das flags de status no cache JSON."""
+    os.makedirs(os.path.dirname(ARQUIVO_JSON_BRUTO), exist_ok=True)
     with open(ARQUIVO_JSON_BRUTO, "w", encoding="utf-8") as f:
         json.dump(dados, f, ensure_ascii=False, indent=2)
 
 
 def refinar_texto_com_gemini(texto_bruto: str) -> str:
-    """Envia a transcrição do Whisper para formatação e limpeza com o Gemini LLM."""
+    """
+    Envia a transcrição para a API do Gemini com suporte a Fallback em Cascata
+    entre diferentes modelos e Retry automático contra erros 503 e 429.
+    """
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("Chave GEMINI_API_KEY não encontrada no arquivo .env!")
@@ -53,12 +67,38 @@ def refinar_texto_com_gemini(texto_bruto: str) -> str:
     Retorne APENAS o texto formatado, sem introduções, saudações ou explicações.
     """
 
-    response = client.models.generate_content(
-        model='gemini-3.6-flash',
-        contents=prompt,
-    )
-    return response.text.strip()
+    # Percorre a lista de modelos em ordem de prioridade
+    for modelo in MODELOS_GEMINI_FALLBACK:
+        # Tenta até 2 vezes por modelo antes de passar para o próximo
+        for tentativa in range(1, 3):
+            try:
+                # print(f"⏳ Tentando refinamento com '{modelo}' (tentativa {tentativa})...")
+                response = client.models.generate_content(
+                    model=modelo,
+                    contents=prompt,
+                )
+                if response.text:
+                    return response.text.strip()
 
+            except APIError as e:
+                codigo_erro = getattr(e, "code", None)
+                
+                # Trata indisponibilidade (503) ou cota estourada (429)
+                if codigo_erro in [429, 503] or "RESOURCE_EXHAUSTED" in str(e) or "UNAVAILABLE" in str(e):
+                    tempo_espera = tentativa * 3  # Espera 3s na 1ª tentativa, 6s na 2ª
+                    print(f"⚠️ Modelo '{modelo}' indisponível ou em limite de cota ({codigo_erro}). Aguardando {tempo_espera}s...")
+                    time.sleep(tempo_espera)
+                else:
+                    # Erros não recuperáveis (ex: modelo inexistente 404, erro de credencial 401)
+                    print(f"❌ Erro não recuperável no modelo '{modelo}': {e}")
+                    break  # Sai das tentativas e pula para o próximo modelo da lista
+
+            except Exception as e:
+                print(f"❌ Erro inesperado ao chamar '{modelo}': {e}")
+                break
+
+    # Se percorreu todos os modelos da cascata e nenhum respondeu
+    raise RuntimeError("❌ Todos os modelos do Gemini falharam ou estão sem cota disponível no momento.")
 
 def processar_e_publicar_sonhos(forcar_todos: bool = False):
     """
@@ -91,13 +131,14 @@ def processar_e_publicar_sonhos(forcar_todos: bool = False):
             texto_refinado = refinar_texto_com_gemini(texto_bruto)
 
             # 2. Backup local em Markdown (opcional)
+            os.makedirs(os.path.dirname(ARQUIVO_BACKUP_MD), exist_ok=True)
             conteudo_md = f"\n## Sonho registrado em: {data_relato}\n\n{texto_refinado}\n\n---\n"
             with open(ARQUIVO_BACKUP_MD, "a", encoding="utf-8") as f:
                 f.write(conteudo_md)
 
             # 3. Publicação no Google Docs (Aba por data)
             print(f"📄 Publicando '{nome_arquivo}' no Google Docs...")
-            doc_url = exportar_docs.publicar_sonho_no_docs(
+            doc_url = export_docs.publicar_sonho_no_docs(
                 texto_refinado=texto_refinado,
                 nome_identificador=nome_arquivo
             )

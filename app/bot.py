@@ -1,61 +1,63 @@
 import os
-import sys
-import time
-import json
 import logging
+import tempfile
+import time
 from dotenv import load_dotenv
-
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
-from google import genai
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, filters
 from groq import Groq
-from app import export_docs
+from google import genai
+from google.genai.errors import APIError
 
-load_dotenv()
+from app import export_docs
 
 # Configuração de Logs
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+logger = logging.getLogger(__name__)
 
-PASTA_AUDIOS_TEMP = "audios_telegram"
-os.makedirs(PASTA_AUDIOS_TEMP, exist_ok=True)
+# Carrega variáveis do .env
+load_dotenv()
 
-# Validando Chaves de API no .env
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-if not TELEGRAM_BOT_TOKEN:
-    raise ValueError("❌ 'TELEGRAM_BOT_TOKEN' não encontrado no arquivo .env!")
-if not GROQ_API_KEY:
-    raise ValueError("❌ 'GROQ_API_KEY' não encontrada no arquivo .env!")
-if not GEMINI_API_KEY:
-    raise ValueError("❌ 'GEMINI_API_KEY' não encontrada no arquivo .env!")
+if not TELEGRAM_BOT_TOKEN or not GROQ_API_KEY or not GEMINI_API_KEY:
+    raise ValueError("❌ Verifique se TELEGRAM_BOT_TOKEN, GROQ_API_KEY e GEMINI_API_KEY estão no .env!")
 
-# Instancia o cliente da Groq
+# Clientes das APIs
 groq_client = Groq(api_key=GROQ_API_KEY)
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+
+# Lista priorizada de modelos (da maior qualidade para maior disponibilidade no Free Tier)
+MODELOS_GEMINI_FALLBACK = [
+    "gemini-3.6-flash",       # Primário: Maior precisão gramatical/narrativa
+    "gemini-3.1-flash-lite",  # Secundário: Ultra-rápido, cota separada
+    "gemini-1.5-flash"        # Terciário: Fallback estável de alta disponibilidade
+]
 
 
 def transcrever_audio_groq(caminho_audio: str) -> str:
-    """
-    Envia o arquivo de áudio para a API da Groq executando whisper-large-v3 em alta velocidade.
-    """
+    """Envia o arquivo de áudio para a API da Groq (Whisper Large-V3)."""
     with open(caminho_audio, "rb") as file:
         transcription = groq_client.audio.transcriptions.create(
             file=(os.path.basename(caminho_audio), file.read()),
             model="whisper-large-v3",
             language="pt",
-            response_format="text"
+            response_format="text",
+            temperature=0.0
         )
     return transcription.strip()
 
 
 def refinar_texto_com_gemini(texto_bruto: str) -> str:
-    """Formata e pontua o texto bruto usando o Gemini LLM."""
-    client = genai.Client(api_key=GEMINI_API_KEY)
-
+    """
+    Envia a transcrição para a API do Gemini com suporte a Fallback em Cascata
+    entre diferentes modelos e Retry automático contra erros 503 e 429.
+    """
     prompt = f"""
     Você é um editor de texto especializado em transcrições de áudio.
     Sua única função é aplicar pontuação e formatação para tornar a leitura fluida, sem alterar o vocabulário ou o estilo do autor.
@@ -73,79 +75,118 @@ def refinar_texto_com_gemini(texto_bruto: str) -> str:
     Retorne APENAS o texto formatado, sem introduções, saudações ou explicações.
     """
 
-    response = client.models.generate_content(
-        model="gemini-3.6-flash",
-        contents=prompt,
+    for modelo in MODELOS_GEMINI_FALLBACK:
+        for tentativa in range(1, 3):
+            try:
+                logger.info(f"⏳ Tentando refinamento com '{modelo}' (tentativa {tentativa})...")
+                response = gemini_client.models.generate_content(
+                    model=modelo,
+                    contents=prompt,
+                )
+                if response and response.text:
+                    return response.text.strip()
+
+            except APIError as e:
+                codigo_erro = getattr(e, "code", None)
+                
+                # Trata indisponibilidade (503) ou cota estourada (429)
+                if codigo_erro in [429, 503] or "RESOURCE_EXHAUSTED" in str(e) or "UNAVAILABLE" in str(e):
+                    tempo_espera = tentativa * 2  # Espera 2s na 1ª tentativa, 4s na 2ª
+                    logger.warning(f"⚠️ Modelo '{modelo}' indisponível/cota estourada ({codigo_erro}). Aguardando {tempo_espera}s...")
+                    time.sleep(tempo_espera)
+                else:
+                    logger.error(f"❌ Erro não recuperável no modelo '{modelo}': {e}")
+                    break  # Sai das tentativas e pula para o próximo modelo
+
+            except Exception as e:
+                logger.error(f"❌ Erro inesperado ao chamar '{modelo}': {e}")
+                break
+
+    raise RuntimeError("❌ Todos os modelos do Gemini falharam ou estão indisponíveis no momento.")
+
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Responde ao comando /start com instruções de uso."""
+    mensagem = (
+        "🌙 **Bem-vindo ao Dreamlistener!**\n\n"
+        "Envie uma mensagem de voz ou áudio contando o seu sonho.\n"
+        "Eu irei transcrever, organizar e publicar automaticamente no seu Diário de Sonhos no Google Docs!"
     )
-    return response.text.strip()
+    await update.message.reply_text(mensagem, parse_mode="Markdown")
 
 
 async def processar_mensagem_de_voz(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Função executada automaticamente toda vez que você envia um áudio no Telegram."""
-    caminho_local_audio = None
+    """
+    Handler principal do Telegram:
+    1. Baixa o áudio enviado
+    2. Transcreve via Groq (Whisper Large-V3)
+    3. Refina via Gemini LLM (com Fallback)
+    4. Publica na aba correta do Google Docs
+    5. Responde ao usuário com o link do documento
+    """
+    mensagem_status = await update.message.reply_text("🎧 Recebi seu áudio! Processando transcrição...")
+
     try:
-        user = update.effective_user
-        logging.info(f"🎤 Novo áudio recebido de {user.first_name}!")
-
-        msg_status = await update.message.reply_text("📥 Áudio recebido! Baixando...")
-
-        # 1. Baixa o arquivo de áudio do Telegram
-        voice = update.message.voice or update.message.audio
-        arquivo_telegram = await context.bot.get_file(voice.file_id)
-        
-        timestamp_str = time.strftime("%Y%m%d_%H%M%S")
-        caminho_local_audio = os.path.join(PASTA_AUDIOS_TEMP, f"sonho_{timestamp_str}.ogg")
-        await arquivo_telegram.download_to_drive(caminho_local_audio)
-
-        # 2. Transcrição Ultra-Rápida com Groq Whisper Large-V3
-        await msg_status.edit_text("⚡ Transcrevendo áudio em alta velocidade com Groq (Whisper Large-V3)...")
-        texto_bruto = transcrever_audio_groq(caminho_local_audio)
-
-        if not texto_bruto:
-            await msg_status.edit_text("⚠️ Não foi possível identificar nenhuma fala no áudio enviado.")
+        # Pega a mensagem de áudio ou voz
+        audio_file = update.message.voice or update.message.audio
+        if not audio_file:
+            await mensagem_status.edit_text("❌ Por favor, envie um arquivo de áudio ou mensagem de voz válido.")
             return
 
-        # 3. Refinamento com Gemini
-        await msg_status.edit_text("✨ Refinando pontuação e estrutura com o Gemini LLM...")
+        # 1. Download do áudio para um arquivo temporário no sistema
+        file_info = await context.bot.get_file(audio_file.file_id)
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as temp_audio:
+            temp_audio_path = temp_audio.name
+
+        await file_info.download_to_drive(temp_audio_path)
+
+        # 2. Transcrição ASR via Groq (Whisper)
+        await mensagem_status.edit_text("⚡ Transcrevendo áudio em alta velocidade (Groq)...")
+        texto_bruto = transcrever_audio_groq(temp_audio_path)
+
+        # Remove o arquivo temporário de áudio da memória/disco
+        if os.path.exists(temp_audio_path):
+            os.remove(temp_audio_path)
+
+        if not texto_bruto:
+            await mensagem_status.edit_text("⚠️ Não consegui identificar nenhuma fala no áudio enviado.")
+            return
+
+        # 3. Refinamento via Gemini LLM (com resiliência de modelos)
+        await mensagem_status.edit_text("✍️ Refinando e formatando o relato (Gemini)...")
         texto_refinado = refinar_texto_com_gemini(texto_bruto)
 
         # 4. Publicação no Google Docs
-        await msg_status.edit_text("📄 Publicando no seu diário no Google Docs...")
-        doc_url = exportar_docs.publicar_sonho_no_docs(
+        await mensagem_status.edit_text("📄 Registrando no seu Diário de Sonhos no Google Docs...")
+        doc_url = export_docs.publicar_sonho_no_docs(
             texto_refinado=texto_refinado,
-            nome_identificador=f"Sonho ({time.strftime('%H:%M')})"
+            nome_identificador=f"Voz_{update.message.message_id}"
         )
 
-        # 5. Resposta final no Telegram
+        # 5. Resposta final para o usuário
         resposta_final = (
-            f"🎉 **Sonho registrado com sucesso!**\n\n"
-            f"📝 **Resumo do Relato:**\n_{texto_refinado[:250]}..._\n\n"
+            "✨ **Sonho registrado com sucesso!**\n\n"
+            f"📝 **Relato:**\n_{texto_refinado}_\n\n"
             f"🔗 [Clique aqui para abrir no Google Docs]({doc_url})"
         )
-        await msg_status.edit_text(resposta_final, parse_mode="Markdown", disable_web_page_preview=True)
+        await mensagem_status.edit_text(resposta_final, parse_mode="Markdown", disable_web_page_preview=True)
 
     except Exception as e:
-        logging.error(f"Erro ao processar mensagem de voz: {e}")
-        if 'msg_status' in locals():
-            await msg_status.edit_text(f"❌ Ocorreu um erro ao processar seu relato: {e}")
-
-    finally:
-        # Garante a remoção do arquivo local temporário
-        if caminho_local_audio and os.path.exists(caminho_local_audio):
-            os.remove(caminho_local_audio)
+        logger.error(f"Erro ao processar mensagem de voz: {e}", exc_info=True)
+        await mensagem_status.edit_text(
+            "❌ Ocorreu um erro ao processar seu relato. Por favor, tente enviar novamente em instantes."
+        )
 
 
 def main():
-    """Inicia o Bot do Telegram e mantém o listener ativo."""
+    """Inicia a aplicação do Bot do Telegram."""
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # Handlers
+    app.add_handler(CommandHandler("start", start_command))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, processar_mensagem_de_voz))
 
-    print("\n🤖 ==================================================")
-    print("🤖 DREAMLISTENER BOT ATIVO (API GROQ WHISPER LARGE-V3)!")
-    print("🤖 Envie um áudio no Telegram e veja a resposta em poucos segundos.")
-    print("🤖 Pressione Ctrl + C no terminal para encerrar.")
-    print("🤖 ==================================================\n")
-
+    logger.info("🚀 Bot do Dreamlistener iniciado e escutando mensagens...")
     app.run_polling()
 
 
