@@ -2,13 +2,25 @@ import os
 import re
 import json
 from datetime import datetime
-from faster_whisper import WhisperModel
+from dotenv import load_dotenv
+from groq import Groq
+
+# Carrega chaves de API do arquivo .env na raiz
+load_dotenv()
 
 # Configurações do Projeto
-DIRETORIO_AUDIOS = "audios"
-MODELO_WHISPER = "large-v3"  # Altere aqui para "small", "large-v3", etc.
-ARQUIVO_JSON_BRUTO = f"sonhos_brutos_{MODELO_WHISPER}.json"
+# Observação: Se moveu os arquivos na reestruturação, os áudios estão em "data/raw_audios"
+DIRETORIO_AUDIOS = os.path.join("data", "raw_audios") if os.path.exists(os.path.join("data", "raw_audios")) else "audios"
+MODELO_WHISPER = "whisper-large-v3"
+ARQUIVO_JSON_BRUTO = os.path.join("data", "json_caches", f"sonhos_brutos_{MODELO_WHISPER}.json")
 EXTENSOES_SUPORTADAS = (".ogg", ".opus", ".mp3", ".m4a", ".wav")
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+if not GROQ_API_KEY:
+    raise ValueError("❌ 'GROQ_API_KEY' não encontrada no arquivo .env!")
+
+# Instancia o cliente da Groq
+groq_client = Groq(api_key=GROQ_API_KEY)
 
 
 def carregar_dados_brutos() -> list:
@@ -19,6 +31,8 @@ def carregar_dados_brutos() -> list:
 
 
 def salvar_dados_brutos(dados: list) -> None:
+    # Garante que a pasta do JSON exista
+    os.makedirs(os.path.dirname(ARQUIVO_JSON_BRUTO), exist_ok=True)
     with open(ARQUIVO_JSON_BRUTO, "w", encoding="utf-8") as f:
         json.dump(dados, f, ensure_ascii=False, indent=2)
 
@@ -35,6 +49,19 @@ def extrair_data_do_nome(caminho_arquivo: str) -> str:
 
     timestamp_arquivo = os.path.getmtime(caminho_arquivo)
     return datetime.fromtimestamp(timestamp_arquivo).strftime("%d/%m/%Y às %H:%M:%S")
+
+
+def transcrever_audio_groq(caminho_audio: str) -> str:
+    """Envia o arquivo para a API da Groq para transcrição ASR via Whisper Large-V3."""
+    with open(caminho_audio, "rb") as file:
+        transcription = groq_client.audio.transcriptions.create(
+            file=(os.path.basename(caminho_audio), file.read()),
+            model=MODELO_WHISPER,
+            language="pt",
+            response_format="text",
+            temperature=0.0
+        )
+    return transcription.strip()
 
 
 def transcrever_audios():
@@ -56,10 +83,7 @@ def transcrever_audios():
         print(f"✨ Nenhum áudio novo para transcrever em '{ARQUIVO_JSON_BRUTO}'.")
         return
 
-    print(f"🔎 Transcrevendo {len(novos_audios)} novo(s) áudio(s) usando o modelo '{MODELO_WHISPER}'...")
-    
-    # Instancia o modelo dinamicamente usando a variável
-    model = WhisperModel(MODELO_WHISPER, device="cpu", compute_type="int8")
+    print(f"⚡ Transcrevendo {len(novos_audios)} novo(s) áudio(s) via Groq API ('{MODELO_WHISPER}')...")
 
     for i, nome_arquivo in enumerate(novos_audios, 1):
         caminho_completo = os.path.join(DIRETORIO_AUDIOS, nome_arquivo)
@@ -67,14 +91,9 @@ def transcrever_audios():
 
         try:
             data_sonho = extrair_data_do_nome(caminho_completo)
-            segments, _ = model.transcribe(
-                caminho_completo, 
-                language="pt", 
-                beam_size=5, 
-                vad_filter=True, 
-                temperature=0.0
-            )
-            texto_bruto = " ".join([seg.text.strip() for seg in list(segments)])
+            
+            # Chamada à API da Groq
+            texto_bruto = transcrever_audio_groq(caminho_completo)
 
             if texto_bruto:
                 dados_existentes.append({
