@@ -7,10 +7,17 @@ transformar a estrutura semi-formatada do documento em candidatos revisáveis.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, time
 from hashlib import sha256
 import argparse
+import os
+from pathlib import Path
 import re
+import sqlite3
+from zoneinfo import ZoneInfo
+
+from app.dream_store import DreamStore
+from app.dream_tags import extract_factual_tags
 
 HEADER_PATTERN = re.compile(
     r"^🗓️(?:\s+(?P<identifier>[^\n]+?)\s+—)?\s*Registrado às (?P<hour>\d{2}:\d{2})\n"
@@ -19,6 +26,7 @@ HEADER_PATTERN = re.compile(
 )
 DIVIDER_PATTERN = re.compile(r"\n?⎯+\s*$")
 MARKER_PATTERN = re.compile(r"dreamlistener:[0-9a-f-]{36}")
+APPLICATION_TIMEZONE = ZoneInfo("America/Sao_Paulo")
 
 
 @dataclass(frozen=True)
@@ -36,6 +44,13 @@ class LegacyImportPreview:
     candidates: tuple[LegacyDreamCandidate, ...]
     ignored_tabs: tuple[str, ...]
     skipped_marked_entries: int
+
+
+@dataclass(frozen=True)
+class LegacyImportResult:
+    imported_count: int
+    skipped_existing_count: int
+    backup_path: Path | None
 
 
 def build_legacy_import_preview(document: dict, *, document_id: str) -> LegacyImportPreview:
@@ -124,6 +139,56 @@ def render_preview(preview: LegacyImportPreview, *, show_candidates: bool = Fals
     return "\n".join(lines)
 
 
+def apply_legacy_import(
+    store: DreamStore,
+    preview: LegacyImportPreview,
+    *,
+    document_url: str,
+    backup_directory: str | Path = "data/backups",
+) -> LegacyImportResult:
+    """Grava a prévia revisada, criando backup antes da primeira alteração."""
+    store.initialize()
+    new_candidates = [
+        candidate for candidate in preview.candidates
+        if not _legacy_record_exists(store, candidate.source_message_id)
+    ]
+    if not new_candidates:
+        return LegacyImportResult(imported_count=0, skipped_existing_count=len(preview.candidates), backup_path=None)
+
+    backup_path = backup_database(store.database_path, backup_directory)
+    imported_count = 0
+    for candidate in new_candidates:
+        dream, created = store.import_legacy_published(
+            source_message_id=candidate.source_message_id,
+            received_at=_legacy_received_at(candidate),
+            dream_date=candidate.dream_date,
+            refined_transcript=candidate.refined_transcript,
+            document_url=document_url,
+        )
+        if created:
+            store.replace_factual_tags(dream.id, extract_factual_tags(candidate.refined_transcript))
+            imported_count += 1
+
+    return LegacyImportResult(
+        imported_count=imported_count,
+        skipped_existing_count=len(preview.candidates) - imported_count,
+        backup_path=backup_path,
+    )
+
+
+def backup_database(database_path: str | Path, backup_directory: str | Path) -> Path:
+    """Cria uma cópia SQLite consistente antes da importação, sem sobrescrever."""
+    source_path = Path(database_path)
+    destination_directory = Path(backup_directory)
+    destination_directory.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    destination_path = destination_directory / f"{source_path.stem}-before-legacy-import-{timestamp}.db"
+
+    with sqlite3.connect(source_path) as source, sqlite3.connect(destination_path) as destination:
+        source.backup(destination)
+    return destination_path
+
+
 def _parse_tab_date(title: str) -> date | None:
     try:
         return date.fromisoformat("-".join(reversed(title.split("/"))))
@@ -156,15 +221,43 @@ def _source_message_id(import_key: str) -> int:
     return int(import_key[:16], 16) & ((1 << 63) - 1)
 
 
+def _legacy_record_exists(store: DreamStore, source_message_id: int) -> bool:
+    try:
+        store.get_by_source_message(
+            source="google_docs_legacy", source_chat_id=0, source_message_id=source_message_id
+        )
+    except LookupError:
+        return False
+    return True
+
+
+def _legacy_received_at(candidate: LegacyDreamCandidate) -> datetime:
+    return datetime.combine(
+        candidate.dream_date,
+        time.fromisoformat(candidate.registered_time),
+        tzinfo=APPLICATION_TIMEZONE,
+    )
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Mostra uma prévia do diário legado no Google Docs.")
+    parser = argparse.ArgumentParser(description="Mostra ou aplica a importação do diário legado.")
     parser.add_argument("--show-candidates", action="store_true", help="Mostra data e chave de cada candidato.")
+    parser.add_argument("--apply", action="store_true", help="Importa os candidatos e cria backup local antes da escrita.")
     arguments = parser.parse_args()
 
     document_id, document_url, document = fetch_existing_diary_document()
     preview = build_legacy_import_preview(document, document_id=document_id)
     print(f"Diário: {document_url}")
     print(render_preview(preview, show_candidates=arguments.show_candidates))
+    if not arguments.apply:
+        return
+
+    database_path = os.getenv("DREAMLISTENER_DB_PATH", "data/dreamlistener.db")
+    result = apply_legacy_import(DreamStore(database_path), preview, document_url=document_url)
+    print(f"Importados agora: {result.imported_count}")
+    print(f"Já existentes e ignorados: {result.skipped_existing_count}")
+    if result.backup_path:
+        print(f"Backup criado: {result.backup_path}")
 
 
 if __name__ == "__main__":

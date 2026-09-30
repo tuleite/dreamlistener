@@ -198,6 +198,17 @@ aba e uma chave curta de cada candidato. Abas como o índice e entradas que já
 contêm `dreamlistener:<UUID>` são ignoradas. A fase de escrita será criada
 somente depois da revisão dessa prévia.
 
+Depois de revisar a prévia e com o bot parado, a escrita exige a flag explícita:
+
+```bash
+python -m app.legacy_docs_import --apply
+```
+
+Antes de qualquer novo registro, o comando cria uma cópia SQLite em
+`data/backups/`. Cada entrada é importada com a origem `google_docs_legacy`,
+o texto refinado vindo do Docs, a data/hora da aba e cabeçalho, link do diário
+e tags factuais. Reexecutar o mesmo comando não duplica entradas já importadas.
+
 ## 7. Benchmark e resultados registrados
 
 `3_validar_modelos.py` avalia `medium`, `large-v3-turbo` e `large-v3` com `faster-whisper` em CPU. Cada modelo é executado em um processo filho para liberar a memória ao final da execução. As métricas são WER, CER, tempo e acurácia calculada como `1 - WER`.

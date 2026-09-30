@@ -284,6 +284,30 @@ class DreamStoreTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "não está disponível"):
             self.store.prepare_publication_retry(dream.id)
 
+    def test_legacy_published_import_is_idempotent_and_keeps_raw_transcript_empty(self) -> None:
+        received_at = datetime.fromisoformat("2026-08-26T17:19:00-03:00")
+        first, created_first = self.store.import_legacy_published(
+            source_message_id=123,
+            received_at=received_at,
+            dream_date=received_at.date(),
+            refined_transcript="Eu estava em uma casa.",
+            document_url="https://docs.google.com/document/d/example/edit",
+        )
+        second, created_second = self.store.import_legacy_published(
+            source_message_id=123,
+            received_at=received_at,
+            dream_date=received_at.date(),
+            refined_transcript="Eu estava em uma casa.",
+            document_url="https://docs.google.com/document/d/example/edit",
+        )
+
+        self.assertTrue(created_first)
+        self.assertFalse(created_second)
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(first.status, "published")
+        self.assertIsNone(first.raw_transcript)
+        self.assertEqual(first.dream_date_source, "imported_docs_tab")
+
 
 if __name__ == "__main__":
     unittest.main()

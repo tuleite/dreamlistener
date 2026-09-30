@@ -274,6 +274,65 @@ class DreamStore:
             ).fetchall()
             return [_dream_from_row(row) for row in rows]
 
+    def import_legacy_published(
+        self,
+        *,
+        source_message_id: int,
+        received_at: datetime,
+        dream_date: date,
+        refined_transcript: str,
+        document_url: str,
+    ) -> tuple[Dream, bool]:
+        """Importa um relato histórico já publicado, de forma idempotente.
+
+        A origem e o chat sintético identificam somente a migração local. O
+        texto bruto fica nulo porque o Google Docs contém o texto já formatado,
+        não a transcrição original.
+        """
+        if not refined_transcript.strip():
+            raise ValueError("Um relato legado não pode ter texto vazio.")
+        if not document_url.strip():
+            raise ValueError("A importação exige a URL do diário de origem.")
+
+        source = "google_docs_legacy"
+        source_chat_id = 0
+        timestamp = _to_utc_iso(received_at)
+        dream_id = str(uuid4())
+        with self._connect() as connection:
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO dreams (
+                        id, source, source_chat_id, source_message_id, received_at,
+                        dream_date, dream_date_source, status, refined_transcript,
+                        document_url, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'imported_docs_tab', 'published', ?, ?, ?, ?)
+                    """,
+                    (
+                        dream_id,
+                        source,
+                        source_chat_id,
+                        source_message_id,
+                        timestamp,
+                        dream_date.isoformat(),
+                        refined_transcript.strip(),
+                        document_url.strip(),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                return (
+                    self.get_by_source_message(
+                        source=source,
+                        source_chat_id=source_chat_id,
+                        source_message_id=source_message_id,
+                        connection=connection,
+                    ),
+                    False,
+                )
+            return self.get_by_id(dream_id, connection=connection), True
+
     def list_pending_publications(self) -> list[Dream]:
         """Lista textos refinados que podem ser publicados ou retomados.
 

@@ -83,6 +83,10 @@
   existente, ignora abas sem data e relatos que já possuem marcador do app, e
   atribui uma chave determinística para a futura importação idempotente. A
   importação no SQLite permanece dependente de revisão humana da prévia.
+* **Aplicação controlada da importação (F3.1):** a flag `--apply` passou a
+  exigir uma ação explícita depois da prévia. Ela cria um backup do SQLite,
+  grava os relatos como publicações históricas idempotentes, preserva a ausência
+  da transcrição bruta e gera tags factuais; não modifica o Google Docs.
 
 ### Etapa 1: Ingestão e Benchmark de Modelos ASR (`1_transcrever.py` / `3_validar_modelos.py`)
 

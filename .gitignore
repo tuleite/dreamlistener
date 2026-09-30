@@ -11,6 +11,7 @@ token.json.invalid-grant.bak
 # Mídia e histórico local
 audios/
 data/*.db
+data/backups/
 processados.txt
 meus_sonhos.md
 meus_sonhos_processado.md

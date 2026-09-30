@@ -1,6 +1,13 @@
 import unittest
+from pathlib import Path
+import tempfile
 
-from app.legacy_docs_import import build_legacy_import_preview, render_preview
+from app.dream_store import DreamStore
+from app.legacy_docs_import import (
+    apply_legacy_import,
+    build_legacy_import_preview,
+    render_preview,
+)
 
 
 def tab(title: str, tab_id: str, text: str) -> dict:
@@ -68,3 +75,30 @@ class LegacyDocsImportTest(unittest.TestCase):
 
         self.assertNotIn("Texto privado", output)
         self.assertIn("30/09/2026 às 08:30", output)
+
+    def test_apply_import_creates_backup_tags_and_is_idempotent(self) -> None:
+        document = {"tabs": [tab(
+            "30/09/2026", "tab-1", "🗓️ Registrado às 08:30\nEu estava em uma casa perto do rio.\n⎯⎯⎯\n"
+        )]}
+        preview = build_legacy_import_preview(document, document_id="document-1")
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database_path = Path(temporary_directory) / "dreamlistener.db"
+            store = DreamStore(database_path)
+            first = apply_legacy_import(
+                store, preview,
+                document_url="https://docs.google.com/document/d/example/edit",
+                backup_directory=Path(temporary_directory) / "backups",
+            )
+            second = apply_legacy_import(
+                store, preview,
+                document_url="https://docs.google.com/document/d/example/edit",
+                backup_directory=Path(temporary_directory) / "backups",
+            )
+
+            imported = store.list_published()
+            self.assertEqual(first.imported_count, 1)
+            self.assertTrue(first.backup_path and first.backup_path.exists())
+            self.assertEqual(second.imported_count, 0)
+            self.assertIsNone(second.backup_path)
+            self.assertEqual(len(imported), 1)
+            self.assertEqual(store.list_tags(imported[0].id), ["agua", "casa"])
