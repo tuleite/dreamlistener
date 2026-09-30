@@ -182,6 +182,22 @@ O menu nativo do Telegram lista `/start`, `/ajuda`, `/buscar` e
 `/retomar_publicacoes`. Os comandos também são explicados nas mensagens de
 boas-vindas e ajuda, para que o uso não dependa de memorizar atalhos.
 
+### 6.1 Prévia de importação do diário legado
+
+Para avaliar relatos que já existiam no Google Docs antes do SQLite, execute:
+
+```bash
+python -m app.legacy_docs_import --show-candidates
+```
+
+O comando é apenas de leitura: não cria documento, não altera o Google Docs e
+não grava no banco. Ele procura abas com título `DD/MM/AAAA`, reconhece os
+cabeçalhos de relatos já usados pelo projeto — incluindo `Voz_<número>` e
+nomes legados como `WhatsApp Ptt ... .ogg` — e mostra somente data, horário,
+aba e uma chave curta de cada candidato. Abas como o índice e entradas que já
+contêm `dreamlistener:<UUID>` são ignoradas. A fase de escrita será criada
+somente depois da revisão dessa prévia.
+
 ## 7. Benchmark e resultados registrados
 
 `3_validar_modelos.py` avalia `medium`, `large-v3-turbo` e `large-v3` com `faster-whisper` em CPU. Cada modelo é executado em um processo filho para liberar a memória ao final da execução. As métricas são WER, CER, tempo e acurácia calculada como `1 - WER`.

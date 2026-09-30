@@ -78,6 +78,11 @@
 * **Descoberta de comandos (F3.2):** o bot passou a registrar atalhos no menu
   nativo do Telegram e a oferecer `/ajuda`, com exemplos de busca e a fronteira
   explícita de que busca não é interpretação.
+* **Prévia de importação do diário legado (F3.1):** foi criado um leitor sem
+  escrita para abas datadas do Google Docs. Ele identifica entradas pelo cabeçalho
+  existente, ignora abas sem data e relatos que já possuem marcador do app, e
+  atribui uma chave determinística para a futura importação idempotente. A
+  importação no SQLite permanece dependente de revisão humana da prévia.
 
 ### Etapa 1: Ingestão e Benchmark de Modelos ASR (`1_transcrever.py` / `3_validar_modelos.py`)
 
