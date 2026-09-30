@@ -174,7 +174,9 @@ não expressam significados psicológicos e podem filtrar somente sonhos publica
 O comando `/buscar` faz recuperação estruturada sem LLM e sem RAG. Ele aceita
 texto livre, `tag:<nome>`, `de:AAAA-MM-DD` e `ate:AAAA-MM-DD`, em qualquer
 combinação, e devolve no máximo cinco sonhos publicados com data, tags, trecho
-curto e link. Exemplos: `/buscar rio`, `/buscar tag:agua` e `/buscar
+curto e link. Quando há mais resultados, informa a quantidade total e que
+exibe apenas os cinco primeiros, com um botão opcional para mostrar todos em
+mensagens separadas. Exemplos: `/buscar rio`, `/buscar tag:agua` e `/buscar
 de:2026-09-01 ate:2026-09-30 tag:casa`. A mesma allowlist que protege a
 ingestão também protege essa leitura.
 

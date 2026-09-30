@@ -15,6 +15,45 @@ class SearchCriteria:
     text: str | None = None
 
 
+def render_result_count(total_count: int, displayed_count: int) -> str:
+    """Explica a paginação sem revelar resultados além do limite escolhido."""
+    if total_count < 0 or displayed_count < 0 or displayed_count > total_count:
+        raise ValueError("As quantidades de resultado são inválidas.")
+    if total_count == 0:
+        return "🔎 Nenhum sonho publicado corresponde à busca."
+    if total_count > displayed_count:
+        return f"🔎 Encontrados {total_count} resultados. Exibindo os {displayed_count} primeiros:"
+    return f"🔎 Encontrados {total_count} resultado(s):"
+
+
+def split_for_telegram(text: str, *, maximum_length: int = 3500) -> list[str]:
+    """Divide uma resposta longa em blocos legíveis dentro do limite do Telegram."""
+    if maximum_length < 1:
+        raise ValueError("O tamanho máximo precisa ser positivo.")
+    if len(text) <= maximum_length:
+        return [text]
+
+    chunks: list[str] = []
+    current = ""
+    for section in text.split("\n\n"):
+        candidate = section if not current else f"{current}\n\n{section}"
+        if len(candidate) <= maximum_length:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+            current = section
+            continue
+        # Uma seção individual excepcionalmente longa é dividida sem omitir texto.
+        while len(section) > maximum_length:
+            chunks.append(section[:maximum_length])
+            section = section[maximum_length:]
+        current = section
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def parse_search_criteria(arguments: list[str]) -> SearchCriteria:
     """Converte filtros simples em critérios tipados, sem gerar SQL.
 

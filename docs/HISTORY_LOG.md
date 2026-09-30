@@ -87,6 +87,19 @@
   exigir uma ação explícita depois da prévia. Ela cria um backup do SQLite,
   grava os relatos como publicações históricas idempotentes, preserva a ausência
   da transcrição bruta e gera tags factuais; não modifica o Google Docs.
+* **Validação operacional da importação (30/09/2026):** a prévia revisada foi
+  aplicada ao diário real. Foram importados 22 relatos legados, sem colisões,
+  e foi criado o backup local
+  `data/backups/dreamlistener-before-legacy-import-20260930-194929.db` antes
+  da escrita. Os dois registros já marcados pelo app continuaram fora da
+  importação.
+* **Contagem na busca (F3):** antes de limitar a resposta do Telegram a cinco
+  itens, `/buscar` passou a conservar a quantidade total encontrada e informar
+  claramente quando está exibindo apenas os primeiros resultados.
+* **Expansão explícita da busca (F3):** quando a busca tem mais de cinco itens,
+  o Telegram oferece o botão `Exibir todos`. A consulta fica associada a um
+  token temporário do mesmo chat e a resposta longa é dividida em mensagens
+  menores, sem incluir o termo ou o relato no callback do botão.
 
 ### Etapa 1: Ingestão e Benchmark de Modelos ASR (`1_transcrever.py` / `3_validar_modelos.py`)
 

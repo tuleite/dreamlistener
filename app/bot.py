@@ -3,6 +3,7 @@ import logging
 import tempfile
 import time
 from datetime import date
+from uuid import uuid4
 from dotenv import load_dotenv
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationBuilder, CallbackQueryHandler, ContextTypes, MessageHandler, CommandHandler, filters
@@ -14,7 +15,7 @@ from app import export_docs
 from app.access_control import is_allowed_chat, parse_allowed_chat_ids
 from app.bot_help import COMMANDS, render_help
 from app.dream_dates import extract_narrated_dream_date, received_date_in_application_timezone
-from app.dream_search import parse_search_criteria
+from app.dream_search import parse_search_criteria, render_result_count, split_for_telegram
 from app.dream_store import GOOGLE_PUBLICATION_FAILURE, Dream, DreamStore
 from app.dream_tags import extract_factual_tags
 
@@ -246,12 +247,19 @@ async def retomar_publicacoes_command(update: Update, context: ContextTypes.DEFA
         await update.message.reply_text(f"✅ {published} publicações pendentes foram retomadas.")
 
 
-def formatar_resultados_busca(dreams: list[Dream]) -> str:
+def formatar_resultados_busca(
+    dreams: list[Dream], *, total_count: int, exibindo_todos: bool = False
+) -> str:
     """Forma uma resposta curta, factual e limitada para o chat autorizado."""
     if not dreams:
-        return "🔎 Nenhum sonho publicado corresponde à busca."
+        return render_result_count(total_count, 0)
 
-    lines = [f"🔎 {len(dreams)} resultado(s):"]
+    header = (
+        f"🔎 Exibindo todos os {total_count} resultados:"
+        if exibindo_todos
+        else render_result_count(total_count, len(dreams))
+    )
+    lines = [header]
     for dream in dreams:
         data_sonho = date.fromisoformat(dream.dream_date).strftime("%d/%m/%Y") if dream.dream_date else "sem data"
         tags = ", ".join(dream_store.list_tags(dream.id)) or "sem tags"
@@ -284,13 +292,62 @@ async def buscar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    matching_dreams = dream_store.search_published(
+        start_date=criteria.start_date,
+        end_date=criteria.end_date,
+        tag=criteria.tag,
+        text=criteria.text,
+    )
+    dreams = matching_dreams[:5]
+    keyboard = None
+    if len(matching_dreams) > len(dreams):
+        token = uuid4().hex
+        sessions = context.application.bot_data.setdefault("search_sessions", {})
+        sessions[token] = {
+            "chat_id": update.effective_chat.id,
+            "criteria": criteria,
+        }
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                f"Exibir todos os {len(matching_dreams)} resultados",
+                callback_data=f"search:all:{token}",
+            )
+        ]])
+    await update.message.reply_text(
+        formatar_resultados_busca(dreams, total_count=len(matching_dreams)),
+        disable_web_page_preview=True,
+        reply_markup=keyboard,
+    )
+
+
+async def exibir_todos_resultados_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mostra todos os resultados da consulta original, em mensagens paginadas."""
+    if not await chat_autorizado(update):
+        return
+    query = update.callback_query
+    await query.answer()
+    _, _, token = query.data.split(":", maxsplit=2)
+    sessions = context.application.bot_data.get("search_sessions", {})
+    session = sessions.pop(token, None)
+    if session is None or session["chat_id"] != query.message.chat.id:
+        await query.message.edit_text(
+            "ℹ️ Esta busca expirou. Envie /buscar novamente para consultar o histórico."
+        )
+        return
+
+    criteria = session["criteria"]
     dreams = dream_store.search_published(
         start_date=criteria.start_date,
         end_date=criteria.end_date,
         tag=criteria.tag,
         text=criteria.text,
-    )[:5]
-    await update.message.reply_text(formatar_resultados_busca(dreams), disable_web_page_preview=True)
+    )
+    messages = split_for_telegram(
+        formatar_resultados_busca(dreams, total_count=len(dreams), exibindo_todos=True)
+    )
+    await query.message.edit_text(messages[0], disable_web_page_preview=True)
+    for message in messages[1:]:
+        await query.message.reply_text(message, disable_web_page_preview=True)
 
 
 async def confirmar_data_do_sonho(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -448,6 +505,7 @@ def main():
     app.add_handler(CommandHandler("retomar_publicacoes", retomar_publicacoes_command))
     app.add_handler(CommandHandler("buscar", buscar_command))
     app.add_handler(CallbackQueryHandler(confirmar_data_do_sonho, pattern=r"^date:(accept|reject):"))
+    app.add_handler(CallbackQueryHandler(exibir_todos_resultados_callback, pattern=r"^search:all:"))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, processar_mensagem_de_voz))
 
     logger.info("🚀 Bot do Dreamlistener iniciado e escutando mensagens...")
