@@ -27,8 +27,11 @@ O processamento ocorre assim:
 2. O arquivo é baixado para um arquivo temporário com extensão `.ogg`.
 3. `transcrever_audio_groq` envia os bytes para a API da Groq, usando o modelo `whisper-large-v3`, idioma `pt`, temperatura `0.0` e resposta em texto.
 4. `refinar_texto_com_gemini` solicita apenas pontuação, parágrafos e remoção de ruídos de fala. O prompt pede preservação de vocabulário, primeira pessoa, nomes, lugares, ordem e conteúdo narrado.
-5. `app.export_docs.publicar_sonho_no_docs` localiza ou cria o documento `Diário de Sonhos`, escolhe a guia da data e insere o relato.
-6. O bot responde com o texto refinado e o link do Google Docs.
+5. O SQLite registra cada transição usando a identidade da mensagem do Telegram, evitando duplicação em retentativas.
+6. Se o relato contiver uma referência simples de data que divirja da data de recebimento, o bot pausa, pede confirmação por botões e retoma a partir da transcrição salva.
+7. `app.export_docs.publicar_sonho_no_docs` localiza ou cria o documento `Diário de Sonhos`, escolhe a guia da data confirmada e insere o relato.
+8. O bot reconstrói o índice da primeira aba exclusivamente a partir dos sonhos publicados no SQLite.
+9. O bot responde com o texto refinado e o link do Google Docs.
 
 O comando `/start` explica esse uso ao usuário.
 
@@ -97,8 +100,23 @@ O bot exige estas variáveis no ambiente antes de iniciar:
 | `TELEGRAM_BOT_TOKEN` | Autenticação do bot do Telegram. |
 | `GROQ_API_KEY` | Transcrição de áudio pela Groq. |
 | `GEMINI_API_KEY` | Refinamento dos relatos pelo Gemini. |
+| `ALLOWED_TELEGRAM_CHAT_IDS` | Lista obrigatória de chats autorizados, separada por vírgulas. Com valor ausente, o bot recusa todos os chats. |
 
 O módulo de Google Docs usa os arquivos `credentials.json` e `token.json` na raiz. O primeiro é usado para iniciar o OAuth quando não há uma sessão válida; o segundo armazena a credencial autorizada e pode ser renovado pelo módulo. Os escopos solicitados são `documents` e `drive.file`.
+
+Se o Google revogar ou rejeitar a renovação do token, o bot não pede
+consentimento no Telegram e não reenvia áudio ou texto ao Gemini. Ele mantém o
+registro em `refined`, avisa a pessoa usuária e ela deve, no computador em que
+o bot roda, executar:
+
+```bash
+python -c "from app.export_docs import reautorizar_google; reautorizar_google(); print('Autorização concluída.')"
+```
+
+Após concluir a tela de consentimento no navegador e reiniciar `python -m
+app.bot`, o comando Telegram `/retomar_publicacoes` publica os textos pendentes.
+Também reconhece registros da versão anterior que tenham falhado somente em
+`publicação no Google Docs`; outras falhas não são retomadas automaticamente.
 
 O arquivo `.env` é carregado por `python-dotenv`. Ele e arquivos `.json`, áudios e extensões de mídia estão ignorados pelo Git conforme `.gitignore`; portanto, não fazem parte dos arquivos versionados avaliados nesta documentação.
 
@@ -118,19 +136,51 @@ python -m app.bot
 
 | Dado | Local | Finalidade |
 | --- | --- | --- |
+| Registro estruturado | `data/dreamlistener.db` | Fonte de verdade para identidade, estado, transcrições, URL e falhas do processamento. Armazena também a data do sonho, sua origem e confirmações pendentes. Arquivo local ignorado pelo Git. |
+| Áudio temporário do bot | Diretório temporário do sistema | Existe somente durante o processamento e é removido ao final, inclusive em falhas. O projeto não arquiva uma cópia local persistente do áudio. |
 | Áudios para lote | `data/raw_audios/` ou `audios/` | Fonte do processamento em lote. |
 | Cache de transcrições | `data/json_caches/sonhos_brutos_whisper-large-v3.json` | Evita nova transcrição do mesmo nome de arquivo e guarda `status_refinado`. |
 | Backup de relatos | `data/meus_sonhos.md` | Cópia local produzida pelo script de refinamento em lote. |
 | Diário principal | Google Docs, título `Diário de Sonhos` | Destino dos relatos publicados. |
-| Arquivo temporário do bot | Diretório temporário do sistema | Usado durante a transcrição do áudio recebido no Telegram. |
 
-No caminho de sucesso do bot, o arquivo temporário é removido após a transcrição. O código atual não usa um bloco `finally`; por isso, se ocorrer uma exceção antes dessa remoção, o arquivo pode permanecer no diretório temporário.
+O arquivo temporário do bot é removido no bloco `finally`; por isso, também é
+descartado quando uma etapa de download, transcrição, refinamento ou publicação
+falha.
 
 ## 6. Observabilidade e tratamento de falhas
 
-`app/bot.py` configura logs no nível `INFO`. As tentativas e falhas de modelo Gemini são registradas. Erros não recuperáveis durante o processamento são registrados com stack trace e o usuário recebe uma mensagem genérica para tentar novamente.
+`app/bot.py` configura logs no nível `INFO`. As tentativas e falhas de modelo
+Gemini são registradas. Os eventos de início, duplicação, publicação e falha
+incluem o UUID interno do sonho para correlação, sem registrar transcrições ou
+textos refinados. Erros não recuperáveis durante o processamento são registrados
+com stack trace e o usuário recebe uma mensagem genérica para tentar novamente.
 
-O fluxo não possui armazenamento persistente de IDs de mensagens do Telegram nem uma fila de reprocessamento. A prevenção contra reprocessamento no lote é baseada no nome do arquivo no cache JSON e na marca `status_refinado`.
+O fluxo do bot persiste a identidade da mensagem do Telegram no SQLite e evita
+duplicação por uma chave única de origem, conversa e mensagem. Uma autorização
+OAuth expirada é uma pausa recuperável: o texto refinado fica disponível para
+`/retomar_publicacoes` depois de um novo consentimento local. Falhas em outras
+etapas não entram nessa retomada automática. No lote, a prevenção contra
+reprocessamento segue baseada no nome do arquivo no cache JSON e na marca
+`status_refinado`.
+
+O índice do Google Docs é uma projeção eventual: uma falha ao atualizá-lo não
+desfaz uma publicação já registrada. Uma execução posterior pode reconstruí-lo a
+partir dos registros publicados no SQLite.
+
+Após o refinamento, o bot atribui tags factuais por uma taxonomia determinística
+de palavras observáveis, como `agua`, `casa`, `familia` e `trabalho`. Essas tags
+não expressam significados psicológicos e podem filtrar somente sonhos publicados.
+
+O comando `/buscar` faz recuperação estruturada sem LLM e sem RAG. Ele aceita
+texto livre, `tag:<nome>`, `de:AAAA-MM-DD` e `ate:AAAA-MM-DD`, em qualquer
+combinação, e devolve no máximo cinco sonhos publicados com data, tags, trecho
+curto e link. Exemplos: `/buscar rio`, `/buscar tag:agua` e `/buscar
+de:2026-09-01 ate:2026-09-30 tag:casa`. A mesma allowlist que protege a
+ingestão também protege essa leitura.
+
+O menu nativo do Telegram lista `/start`, `/ajuda`, `/buscar` e
+`/retomar_publicacoes`. Os comandos também são explicados nas mensagens de
+boas-vindas e ajuda, para que o uso não dependa de memorizar atalhos.
 
 ## 7. Benchmark e resultados registrados
 
@@ -148,10 +198,12 @@ Há relatórios adicionais para WER antes/depois, BERTScore e repetibilidade do 
 
 ## 8. Limites atuais verificáveis
 
-- Não há testes automatizados versionados.
+- Há testes unitários versionados para a camada SQLite; ainda não há testes de integração com APIs externas.
 - Não há configuração de plataforma de deploy, além de `docs/Procfile` com o comando de worker.
-- O bot remove o áudio temporário somente após a transcrição bem-sucedida.
-- O identificador publicado pelo bot é `Voz_<message_id>`, mas esse ID não é persistido fora do Google Docs.
+- O bot registra a entrada antes de chamar serviços externos e não duplica uma mensagem do Telegram já registrada.
+- O bot remove o áudio temporário no bloco `finally`, inclusive quando a transcrição ou uma etapa posterior falha.
+- O Dreamlistener não persiste cópias locais de áudios enviados pelo Telegram; essa política não exclui a mensagem original da conta do Telegram.
+- O identificador publicado pelo bot é `Voz_<message_id>` e a identidade completa da mensagem de origem é persistida no SQLite.
 - O relatório HTML navegável, o agente analítico, o agente junguiano e a geração automática de índice são itens do backlog e não estão implementados.
 - Os scripts de benchmark usam caminhos relativos distintos dos caminhos usados pelos scripts de lote; sua execução depende do diretório de trabalho e da presença dos arquivos esperados.
 
