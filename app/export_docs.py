@@ -1,12 +1,17 @@
 import os
 import json
 import time
+from datetime import date
 from dotenv import load_dotenv
 
 from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+
+from app.docs_projection import INDEX_PLACEHOLDER, document_contains_marker, dream_marker, index_replacement_request
+from app.dream_index import render_published_dream_index
 
 load_dotenv()
 
@@ -20,15 +25,24 @@ ARQUIVO_CREDENCIAIS = "credentials.json"
 ARQUIVO_TOKEN = "token.json"
 
 
-def autenticar_google() -> Credentials:
+class GoogleReauthorizationRequired(RuntimeError):
+    """Indica que o consentimento OAuth deve ser concedido novamente localmente."""
+
+
+def autenticar_google(*, force_new_authorization: bool = False) -> Credentials:
     """Realiza o fluxo de autenticação OAuth 2.0 e salva/atualiza o token de acesso."""
     creds = None
-    if os.path.exists(ARQUIVO_TOKEN):
+    if os.path.exists(ARQUIVO_TOKEN) and not force_new_authorization:
         creds = Credentials.from_authorized_user_file(ARQUIVO_TOKEN, SCOPES)
     
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            try:
+                creds.refresh(Request())
+            except RefreshError as error:
+                raise GoogleReauthorizationRequired(
+                    "A autorização do Google expirou ou foi revogada; um novo consentimento é necessário."
+                ) from error
         else:
             if not os.path.exists(ARQUIVO_CREDENCIAIS):
                 raise FileNotFoundError(
@@ -42,6 +56,15 @@ def autenticar_google() -> Credentials:
             token_file.write(creds.to_json())
             
     return creds
+
+
+def reautorizar_google() -> Credentials:
+    """Abre o consentimento OAuth local e substitui o token somente após sucesso.
+
+    Esta função deve ser executada no computador onde o bot roda. Ela não é
+    chamada pelo Telegram porque o consentimento acontece no navegador local.
+    """
+    return autenticar_google(force_new_authorization=True)
 
 
 def obter_ou_criar_documento(docs_service, drive_service, titulo_doc: str) -> tuple[str, str]:
@@ -91,7 +114,7 @@ def obter_ou_criar_guia_por_data(docs_service, doc_id: str, nome_data: str) -> t
         # Só insere o cabeçalho se ele ainda NÃO estiver presente na 1ª aba
         if "📌 DIÁRIO DE SONHOS" not in texto_acumulado_1a_aba:
             print("📌 Configurando 1ª aba para 'Índice & Análises' pela primeira vez...")
-            texto_intro = "📌 DIÁRIO DE SONHOS — ÍNDICE & ANÁLISES\n\nEsta aba é reservada para resumos, mapeamento de tags e sínteses do agente analítico.\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+            texto_intro = f"📌 DIÁRIO DE SONHOS — ÍNDICE & ANÁLISES\n\n{INDEX_PLACEHOLDER}\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
             docs_service.documents().batchUpdate(
                 documentId=doc_id,
                 body={"requests": [{
@@ -100,6 +123,15 @@ def obter_ou_criar_guia_por_data(docs_service, doc_id: str, nome_data: str) -> t
                         "text": texto_intro
                     }
                 }]}
+            ).execute()
+        elif INDEX_PLACEHOLDER not in texto_acumulado_1a_aba:
+            end_index = body_content[-1].get("endIndex", 1) - 1 if body_content else 1
+            docs_service.documents().batchUpdate(
+                documentId=doc_id,
+                body={"requests": [{"insertText": {
+                    "location": {"index": end_index, "tabId": tab_id_primeira},
+                    "text": f"\n{INDEX_PLACEHOLDER}\n",
+                }}]},
             ).execute()
 
     # 2. Busca se a aba para a data especificada já existe
@@ -138,7 +170,8 @@ def adicionar_sonho_em_guia(
     data_apenas: str, 
     hora_apenas: str, 
     texto_refinado: str, 
-    id_audio: str = None
+    id_audio: str = None,
+    id_sonho: str = None,
 ):
     """Insere o relato na guia correspondente à data no Google Docs."""
     tab_id, index_insercao = obter_ou_criar_guia_por_data(docs_service, doc_id, data_apenas)
@@ -146,6 +179,8 @@ def adicionar_sonho_em_guia(
     titulo_secao = f"🗓️ Registrado às {hora_apenas}\n"
     if id_audio:
         titulo_secao = f"🗓️ {id_audio} — Registrado às {hora_apenas}\n"
+    if id_sonho:
+        titulo_secao += f"🔖 {dream_marker(id_sonho)}\n"
 
     corpo_texto = f"{texto_refinado}\n"
     divisor = "⎯" * 40 + "\n\n"
@@ -171,7 +206,9 @@ def adicionar_sonho_em_guia(
 def publicar_sonho_no_docs(
     texto_refinado: str, 
     nome_identificador: str = "Novo Sonho", 
-    data_hora: time.struct_time = None
+    data_hora: time.struct_time = None,
+    data_sonho: date = None,
+    id_sonho: str = None,
 ) -> str:
     """
     Função principal exportável para integrar com outros scripts do pipeline.
@@ -180,7 +217,7 @@ def publicar_sonho_no_docs(
     if data_hora is None:
         data_hora = time.localtime()
 
-    data_apenas = time.strftime("%d/%m/%Y", data_hora)
+    data_apenas = data_sonho.strftime("%d/%m/%Y") if data_sonho else time.strftime("%d/%m/%Y", data_hora)
     hora_apenas = time.strftime("%H:%M", data_hora)
 
     creds = autenticar_google()
@@ -190,6 +227,14 @@ def publicar_sonho_no_docs(
     # 1. Obtém/cria o diário e gera o link
     doc_id, doc_url = obter_ou_criar_documento(docs_service, drive_service, NOME_DOCUMENTO_PADRAO)
 
+    if id_sonho:
+        documento = docs_service.documents().get(
+            documentId=doc_id, includeTabsContent=True
+        ).execute()
+        if document_contains_marker(documento, dream_marker(id_sonho)):
+            print(f"ℹ️ Sonho '{id_sonho}' já está publicado no Google Docs.")
+            return doc_url
+
     # 2. Publica o sonho na guia da data
     adicionar_sonho_em_guia(
         docs_service=docs_service,
@@ -197,9 +242,29 @@ def publicar_sonho_no_docs(
         data_apenas=data_apenas,
         hora_apenas=hora_apenas,
         texto_refinado=texto_refinado,
-        id_audio=nome_identificador
+        id_audio=nome_identificador,
+        id_sonho=id_sonho,
     )
 
+    return doc_url
+
+
+def atualizar_indice_no_docs(dreams) -> str:
+    """Atualiza a área reservada da primeira aba com dados já publicados."""
+    creds = autenticar_google()
+    docs_service = build("docs", "v1", credentials=creds)
+    drive_service = build("drive", "v3", credentials=creds)
+    doc_id, doc_url = obter_ou_criar_documento(docs_service, drive_service, NOME_DOCUMENTO_PADRAO)
+    documento = docs_service.documents().get(documentId=doc_id, includeTabsContent=True).execute()
+    primeira_tab = documento.get("tabs", [])[0]
+    tab_id = primeira_tab["tabProperties"]["tabId"]
+
+    docs_service.documents().batchUpdate(
+        documentId=doc_id,
+        body={"requests": [
+            index_replacement_request(tab_id, render_published_dream_index(dreams))
+        ]},
+    ).execute()
     return doc_url
 
 
